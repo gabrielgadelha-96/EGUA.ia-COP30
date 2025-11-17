@@ -96,9 +96,8 @@ if __name__ == '__main__':
     chuva_baixa = 10.5
     nivel_baixo = 0.5
     elevacao_alta = 45.0
-    umidade_normal = 50.0 # Adicione a umidade do solo
 
-    # A função agora requer 4 parâmetros
+    # A função agora requer 3 parâmetros
     predict_flood_risk(chuva_baixa, nivel_baixo, elevacao_alta)
 ```
 
