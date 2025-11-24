@@ -1,78 +1,124 @@
-# main.py
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
+from typing import Dict
 
-# --- 1. Importar a função REAL da IA ---
-# Importa a função do arquivo 'use_model.py'
+# --- 1. Importação Segura da IA ---
 try:
     from use_model import predict_flood_risk
 except ImportError:
-    print("ERRO: Não foi possível importar 'predict_flood_risk' do arquivo 'use_model.py'")
+    print("CRÍTICO: 'use_model.py' não encontrado.")
     predict_flood_risk = None
 
+# --- 2. DADOS: O Backend detém o conhecimento das elevações ---
+# Lista oficial dos bairros continentais de Belém e suas cotas médias.
+# Fonte aproximada: Topografia de Belém (Baixadas vs Espigão).
 
-# --- 2. Definição do NOVO Contrato (Plano B) ---
+BAIRROS_BELEM = {
+    # --- ZONA BAIXA (Cota 4m - 6m) -> Alto Risco de Maré ---
+    "Jurunas": 4.0,
+    "Condor": 4.0,
+    "Guamá": 4.5,
+    "Terra Firme": 4.5,
+    "Cremação": 5.0,
+    "Cidade Velha": 5.0,
+    "Reduto": 5.0,
+    "Campina": 6.0,
+    "Comércio": 4.0,
+    "Telégrafo": 5.0,
+    "Barreiro": 5.0,
+    "Sacramenta": 5.5,
+    "Val-de-Cans": 4.0,
+    "Pratinha": 4.0,
+    "Miramar": 5.0,
+    "Universitário": 5.0,
+    "Maracacuera": 5.0,
+    "Paracuri": 5.0,
+    
+    # --- ZONA MÉDIA (Cota 6m - 9m) ---
+    "Umarizal": 6.0,
+    "Batista Campos": 9.0,
+    "Canudos": 8.0,
+    "Fátima": 9.0,
+    "Pedreira": 7.0,
+    "Souza": 9.0,
+    "Aurá": 8.0,
+    "Cabanagem": 8.0,
+    "Una": 7.0,
+    "Tapanã": 7.0,
+    "Bengui": 6.0,
+    "Agulha": 7.0,
+    "Águas Negras": 6.0,
+    "Campina de Icoaraci": 7.0,
+    "Parque Guajará": 6.0,
+    "Ponta Grossa": 6.0,
+    "Maracangalha": 6.0,
+    
+    # --- ZONA ALTA (Cota > 10m) -> Baixo Risco ---
+    "Nazaré": 13.0,
+    "São Brás": 12.0,
+    "Marco": 13.0,
+    "Curió-Utinga": 10.0,
+    "Guanabara": 10.0,
+    "Castanheira": 11.0,
+    "Marambaia": 12.0,
+    "Mangueirão": 10.0,
+    "Parque Verde": 14.0,
+    "Coqueiro": 10.0,
+    "Águas Lindas": 15.0,
+    "São Clemente": 12.0,
+    "Tenoné": 11.0,
+    "Cruzeiro": 10.0
+}
 
-# ENTRADA: O que o Frontend vai enviar (Baseado no README)
+# --- 3. Contratos de Dados (Schemas) ---
+
 class RiscoInput(BaseModel):
-    Rainfall_mm: float = Field(..., description="Chuva em milímetros (mm)")
-    WaterLevel_m: float = Field(..., description="Nível da água/maré em metros (m)")
-    Elevation_m: float = Field(..., description="Elevação da área em metros (m)")
+    # O Frontend envia apenas o clima atual (O que muda no tempo)
+    Rainfall_mm: float = Field(..., description="Chuva nas últimas 24h")
+    WaterLevel_m: float = Field(..., description="Nível da maré")
+    
+    class Config:
+        extra = "ignore"
 
-# SAÍDA: O que sua API vai devolver (Simples: 0 ou 1)
-class RiscoOutput(BaseModel):
-    risco_calculado: float # Alterado para float para aceitar a saída do Regressor
-    classificacao: str = Field(description="Texto amigável da classificação")
+# Modelo de DETALHE do bairro (O que o frontend vai ler)
+class DetalheBairro(BaseModel):
+    risco: float          # O valor predito (0 ou 1, ou decimal)
+    elevacao_media: float # A elevação usada no cálculo
 
+class RiscoOutput(RootModel):
+    # O JSON final será: { "NomeBairro": { "risco": X, "elevacao_media": Y } }
+    root: Dict[str, DetalheBairro]
 
-# --- 3. Criação da API ---
-app = FastAPI(
-    title="EGUA.ia - Motor de Previsão de Risco",
-    description="API que prevê risco de enchente com base no modelo Random Forest."
-)
+# --- 4. Inicialização da API ---
+app = FastAPI(title="Motor de Risco Belém", version="Final")
 
-
-# --- 4. Endpoint Modificado (Conectado à IA Real) ---
+# --- 5. O Loop Simplificado ---
 
 @app.post("/prever_risco", response_model=RiscoOutput)
-async def prever_risco(dados_entrada: RiscoInput):
-    """
-    Recebe dados de chuva, nível da água e elevação, 
-    e retorna o risco de enchente (0 ou 1).
-    """
+async def prever_risco(dados: RiscoInput):
     
+    json_final = {}
+
+    # Segurança: Se a IA falhar, retorna vazio
     if predict_flood_risk is None:
-        return {
-            "risco_calculado": -1.0,
-            "classificacao": "ERRO: Modelo de IA não foi carregado."
+        return {}
+
+    # LOOP CENTRAL:
+    # Percorre cada bairro, puxa a elevação fixa, calcula com a chuva atual
+    # e escreve no dicionário final.
+    for bairro, altitude_fixa in BAIRROS_BELEM.items():
+        
+        # 1. Puxa os valores e Calcula
+        risco_ia = predict_flood_risk(
+            rainfall=dados.Rainfall_mm,
+            water_level=dados.WaterLevel_m,
+            elevation=altitude_fixa
+        )
+        
+        # 2. Escreve no JSON final
+        json_final[bairro] = {
+            "risco": float(risco_ia),
+            "elevacao_media": altitude_fixa
         }
 
-    # --- CORREÇÃO APLICADA AQUI ---
-    # Os nomes dos parâmetros (rainfall, water_level, elevation)
-    # agora batem com a função em 'use_model.py'
-    
-    previsao_bruta = predict_flood_risk(
-        rainfall=dados_entrada.Rainfall_mm, 
-        water_level=dados_entrada.WaterLevel_m,
-        elevation=dados_entrada.Elevation_m
-    )
-    
-    # 2. Converter o resultado para um texto amigável
-    # O modelo é um REGRESSOR, então ele retorna um número (ex: 0.87 ou 0.12)
-    # Vamos classificar: se for > 0.5, consideramos Risco (1).
-    
-    classificacao_texto = "Sem Risco de Enchente"
-    risco_final = 0 # Valor binário
-    
-    if previsao_bruta > 0.5: # Limite de decisão (threshold)
-        classificacao_texto = "ALERTA: Risco de Enchente Detectado"
-        risco_final = 1
-    elif previsao_bruta < 0:
-         classificacao_texto = "ERRO: Falha no cálculo do modelo"
-
-
-    # 3. Retornar a resposta no formato do "RiscoOutput"
-    return {
-        "risco_calculado": previsao_bruta, # Retorna o valor exato (ex: 0.87)
-        "classificacao": classificacao_texto # Retorna o texto amigável
-    }
+    return json_final
