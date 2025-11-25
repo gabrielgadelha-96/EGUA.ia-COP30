@@ -85,7 +85,7 @@ async def prever_risco(dados: RiscoInput):
         
         # 2. Calibragem Topográfica Suave
         # Subtrai um pouco do risco baseado na altura para diferenciar os bairros
-        fator_seguranca = (elevacao_fixa * 0.05) 
+        fator_seguranca = (elevacao_fixa * 0.03) 
         risco_ajustado = float(risco_ia) - fator_seguranca
         
         # Garante que fique entre 0.0 e 1.0
