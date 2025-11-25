@@ -10,9 +10,9 @@ except ImportError:
     print("CRÍTICO: 'use_model.py' não encontrado.")
     predict_flood_risk = None
 
-# --- 2. Lista Oficial: Bairros e Elevações (Fonte: Topografia Belém) ---
+# --- 2. Lista Oficial: Bairros e Elevações ---
 BAIRROS_BELEM = {
-    # --- ZONA BAIXA (Risco Alto com Maré) ---
+    # BAIXADAS
     "Jurunas": 4.0, "Condor": 4.0, "Guamá": 4.5, "Terra Firme": 4.5,
     "Cremação": 5.0, "Cidade Velha": 5.0, "Reduto": 5.0,
     "Campina": 6.0, "Comércio": 4.0, "Telégrafo": 5.0,
@@ -20,7 +20,7 @@ BAIRROS_BELEM = {
     "Pratinha": 4.0, "Miramar": 5.0, "Universitário": 5.0,
     "Maracacuera": 5.0, "Paracuri": 5.0, "Bengui": 6.0,
     
-    # --- ZONA MÉDIA (Transição) ---
+    # ZONA MÉDIA
     "Umarizal": 6.0, "Batista Campos": 9.0, "Canudos": 8.0,
     "Fátima": 9.0, "Pedreira": 7.0, "Souza": 9.0,
     "Aurá": 8.0, "Cabanagem": 8.0, "Una": 7.0,
@@ -28,7 +28,7 @@ BAIRROS_BELEM = {
     "Campina de Icoaraci": 7.0, "Parque Guajará": 6.0,
     "Ponta Grossa": 6.0, "Maracangalha": 6.0,
     
-    # --- ZONA ALTA / ESPIGÃO (Risco Baixo) ---
+    # ESPIGÃO/ALTOS
     "Nazaré": 13.0, "São Brás": 12.0, "Marco": 13.0,
     "Curió-Utinga": 10.0, "Guanabara": 10.0, "Castanheira": 11.0,
     "Marambaia": 12.0, "Mangueirão": 10.0, "Parque Verde": 14.0,
@@ -39,68 +39,75 @@ BAIRROS_BELEM = {
 # --- 3. Contratos de Dados (Schemas) ---
 
 class RiscoInput(BaseModel):
-    # Recebe apenas o clima atual
     Rainfall_mm: float = Field(..., description="Chuva nas últimas 24h")
     WaterLevel_m: float = Field(..., description="Nível da maré")
-    
     class Config:
         extra = "ignore"
 
+# Atualizamos o modelo para incluir o TEXTO da classificação
 class DetalheBairro(BaseModel):
-    risco: float          # Será 0.0 ou 1.0
+    risco: float          # O valor numérico (ex: 0.55)
     elevacao_media: float
+    classificacao: str    # "Baixo", "Médio" ou "Alto"
 
 class RiscoOutput(RootModel):
     root: Dict[str, DetalheBairro]
 
 # --- 4. Inicialização da API ---
-app = FastAPI(title="Motor de Risco Belém (Final)", version="1.0.0")
+app = FastAPI(title="Motor de Risco Belém (Graduado)", version="Final-Percentage")
 
-# --- 5. CONFIGURAÇÃO DO CORS (Obrigatório para o Frontend) ---
+# --- 5. CONFIGURAÇÃO DO CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # Permite acesso de qualquer site (Frontend)
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],      # Permite todos os métodos (POST, GET...)
-    allow_headers=["*"],      # Permite todos os cabeçalhos
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# --- 6. Endpoint Principal ---
+# --- 6. Endpoint com Lógica de Porcentagem ---
 
 @app.post("/prever_risco", response_model=RiscoOutput)
 async def prever_risco(dados: RiscoInput):
-    
     json_final = {}
-
+    
     if predict_flood_risk is None:
         return {}
 
-    # Loop pelos 48 bairros
     for bairro, elevacao_fixa in BAIRROS_BELEM.items():
         
-        # 1. IA: Calcula o risco base com os dados atuais
+        # 1. IA: Calcula o risco base (ex: 0.90)
         risco_ia = predict_flood_risk(
             rainfall=dados.Rainfall_mm,
             water_level=dados.WaterLevel_m,
             elevation=elevacao_fixa
         )
         
-        # 2. CALIBRAGEM TOPOGRÁFICA
-        # Subtrai 4% de risco para cada metro de altura.
-        # Isso garante que bairros altos fiquem "Verdes" em chuvas médias.
-        fator_seguranca = (elevacao_fixa * 0.04) 
+        # 2. Calibragem Topográfica Suave
+        # Subtrai um pouco do risco baseado na altura para diferenciar os bairros
+        fator_seguranca = (elevacao_fixa * 0.03) 
         risco_ajustado = float(risco_ia) - fator_seguranca
         
-        # 3. BINARIZAÇÃO (0 ou 1)
-        if risco_ajustado > 0.5:
-            risco_final = 1.0 # ALAGA (Vermelho)
+        # Garante que fique entre 0.0 e 1.0
+        if risco_ajustado < 0.0: risco_ajustado = 0.0
+        if risco_ajustado > 1.0: risco_ajustado = 1.0
+        
+        # 3. NOVA LÓGICA DE CLASSIFICAÇÃO (0-40, 41-60, 61-100)
+        
+        label_risco = "Indefinido"
+        
+        if risco_ajustado <= 0.40:
+            label_risco = "Baixo"   # Verde
+        elif risco_ajustado <= 0.60:
+            label_risco = "Médio"   # Amarelo/Laranja
         else:
-            risco_final = 0.0 # SEGURO (Verde)
+            label_risco = "Alto"    # Vermelho
 
-        # 4. Monta o JSON
+        # 4. Salva no JSON
         json_final[bairro] = {
-            "risco": risco_final,
-            "elevacao_media": elevacao_fixa
+            "risco": round(risco_ajustado, 2), # Devolve o número arredondado (ex: 0.55)
+            "elevacao_media": elevacao_fixa,
+            "classificacao": label_risco       # Devolve o texto
         }
 
     return json_final
