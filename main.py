@@ -3,16 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, RootModel
 from typing import Dict
 
-# --- 1. Importação Segura da IA ---
+# --- 1. Importação Segura ---
 try:
     from use_model import predict_flood_risk
 except ImportError:
-    print("CRÍTICO: 'use_model.py' não encontrado.")
     predict_flood_risk = None
 
-# --- 2. Lista Oficial: Bairros e Elevações ---
+# --- 2. Lista Oficial (Bairros e Cotas) ---
 BAIRROS_BELEM = {
-    # BAIXADAS
+    # ZONA BAIXA
     "Jurunas": 4.0, "Condor": 4.0, "Guamá": 4.5, "Terra Firme": 4.5,
     "Cremação": 5.0, "Cidade Velha": 5.0, "Reduto": 5.0,
     "Campina": 6.0, "Comércio": 4.0, "Telégrafo": 5.0,
@@ -28,7 +27,7 @@ BAIRROS_BELEM = {
     "Campina de Icoaraci": 7.0, "Parque Guajará": 6.0,
     "Ponta Grossa": 6.0, "Maracangalha": 6.0,
     
-    # ESPIGÃO/ALTOS
+    # ZONA ALTA
     "Nazaré": 13.0, "São Brás": 12.0, "Marco": 13.0,
     "Curió-Utinga": 10.0, "Guanabara": 10.0, "Castanheira": 11.0,
     "Marambaia": 12.0, "Mangueirão": 10.0, "Parque Verde": 14.0,
@@ -36,27 +35,22 @@ BAIRROS_BELEM = {
     "Tenoné": 11.0, "Cruzeiro": 10.0
 }
 
-# --- 3. Contratos de Dados (Schemas) ---
-
+# --- 3. Contratos ---
 class RiscoInput(BaseModel):
-    Rainfall_mm: float = Field(..., description="Chuva nas últimas 24h")
-    WaterLevel_m: float = Field(..., description="Nível da maré")
-    class Config:
-        extra = "ignore"
+    Rainfall_mm: float = Field(..., description="Chuva (mm)")
+    WaterLevel_m: float = Field(..., description="Nível Rio (m)")
+    class Config: extra = "ignore"
 
-# Atualizamos o modelo para incluir o TEXTO da classificação
 class DetalheBairro(BaseModel):
-    risco: float          # O valor numérico (ex: 0.55)
+    risco: float
     elevacao_media: float
-    classificacao: str    # "Baixo", "Médio" ou "Alto"
+    classificacao: str
 
 class RiscoOutput(RootModel):
     root: Dict[str, DetalheBairro]
 
-# --- 4. Inicialização da API ---
-app = FastAPI(title="Motor de Risco Belém (Graduado)", version="Final-Percentage")
+app = FastAPI(title="Motor de Risco (Final)", version="1.0.0")
 
-# --- 5. CONFIGURAÇÃO DO CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -65,8 +59,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 6. Endpoint com Lógica de Porcentagem ---
-
+# --- 4. O Endpoint Inteligente ---
 @app.post("/prever_risco", response_model=RiscoOutput)
 async def prever_risco(dados: RiscoInput):
     json_final = {}
@@ -74,40 +67,53 @@ async def prever_risco(dados: RiscoInput):
     if predict_flood_risk is None:
         return {}
 
+    # DETECTOR DE CATÁSTROFE: Se a chuva for extrema, ignora a altura
+    is_catastrofe = dados.Rainfall_mm > 100 or dados.WaterLevel_m > 3.8
+
     for bairro, elevacao_fixa in BAIRROS_BELEM.items():
         
-        # 1. IA: Calcula o risco base (ex: 0.90)
+        # 1. Risco Base da IA
         risco_ia = predict_flood_risk(
             rainfall=dados.Rainfall_mm,
             water_level=dados.WaterLevel_m,
             elevation=elevacao_fixa
         )
         
-        # 2. Calibragem Topográfica Suave
-        # Subtrai um pouco do risco baseado na altura para diferenciar os bairros
-        fator_seguranca = (elevacao_fixa * 0.03) 
-        risco_ajustado = float(risco_ia) - fator_seguranca
-        
-        # Garante que fique entre 0.0 e 1.0
+        risco_ajustado = float(risco_ia)
+
+        # 2. APLICAÇÃO DE VIÉS
+        if is_catastrofe:
+            # DILÚVIO: Ninguém é salvo pela altura. O risco da IA prevalece.
+            risco_ajustado = risco_ajustado 
+            
+        elif elevacao_fixa <= 5.5:
+            # BAIXADAS (Chuva Normal): SOMA risco para garantir vermelho
+            risco_ajustado += 0.15 
+            
+        elif elevacao_fixa >= 10.0:
+            # ALTOS (Chuva Normal): SUBTRAI muito risco (0.05) para garantir verde
+            risco_ajustado -= (elevacao_fixa * 0.05) 
+            
+        else:
+            # MÉDIOS (Chuva Normal): Subtrai pouco
+            risco_ajustado -= (elevacao_fixa * 0.02)
+
+        # 3. Travas
         if risco_ajustado < 0.0: risco_ajustado = 0.0
         if risco_ajustado > 1.0: risco_ajustado = 1.0
         
-        # 3. NOVA LÓGICA DE CLASSIFICAÇÃO (0-40, 41-60, 61-100)
-        
-        label_risco = "Indefinido"
-        
-        if risco_ajustado <= 0.40:
-            label_risco = "Baixo"   # Verde
-        elif risco_ajustado <= 0.60:
-            label_risco = "Médio"   # Amarelo/Laranja
+        # 4. Classificação
+        if risco_ajustado <= 0.45:
+            label = "Baixo"
+        elif risco_ajustado <= 0.75: 
+            label = "Médio"
         else:
-            label_risco = "Alto"    # Vermelho
+            label = "Alto"
 
-        # 4. Salva no JSON
         json_final[bairro] = {
-            "risco": round(risco_ajustado, 2), # Devolve o número arredondado (ex: 0.55)
+            "risco": round(risco_ajustado, 2),
             "elevacao_media": elevacao_fixa,
-            "classificacao": label_risco       # Devolve o texto
+            "classificacao": label
         }
 
     return json_final
